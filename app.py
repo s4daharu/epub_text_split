@@ -1,38 +1,34 @@
 import streamlit as st
-from langchain.text_splitter import RecursiveCharacterTextSplitter, CharacterTextSplitter
+from langchain.text_splitter import CharacterTextSplitter, RecursiveCharacterTextSplitter
 from ebooklib import epub
 from bs4 import BeautifulSoup
 import tempfile
 import os
+import zipfile
 import re
 
-# Session state initialization
+# Configuration
+CHUNK_SIZE = 1950
+CHUNK_OVERLAP = 10
+PREFIX = "translate following text from chinese to english\n"
+
+# Session state
 if 'chapters' not in st.session_state:
     st.session_state.chapters = []
-if 'chapter_index' not in st.session_state:
-    st.session_state.chapter_index = 0
+if 'processed_epub' not in st.session_state:
+    st.session_state.processed_epub = None
 
-# Configuration settings in sidebar
-with st.sidebar:
-    st.header("Processing Settings")
-    CHUNK_SIZE = st.number_input("Chunk Size", min_value=100, value=1950)
-    CHUNK_OVERLAP = st.number_input("Chunk Overlap", min_value=0, value=10)
-    SPLITTER_CHOICE = st.selectbox("Splitter Type", ["Character", "RecursiveCharacter"])
-    LENGTH_FUNCTION = st.selectbox("Length Metric", ["Characters", "Tokens"])
-
-def extract_chapters(epub_content):
-    """Extract chapters from EPUB with improved error handling"""
+def extract_epub_chapters(epub_content):
+    """Extract chapters from EPUB with multiple encoding support"""
     chapters = []
     with tempfile.NamedTemporaryFile(delete=False) as tmp_file:
         tmp_file.write(epub_content)
         tmp_file_name = tmp_file.name
-
     try:
         book = epub.read_epub(tmp_file_name)
         for item in book.get_items():
             if isinstance(item, epub.EpubHtml):
                 content = item.get_content()
-                # Try multiple encodings
                 for encoding in ['utf-8', 'gb18030', 'latin-1']:
                     try:
                         text = content.decode(encoding)
@@ -45,72 +41,88 @@ def extract_chapters(epub_content):
         os.unlink(tmp_file_name)
     return chapters
 
-def get_token_length(text):
-    """Calculate token length using cl100k_base encoding"""
-    enc = tiktoken.get_encoding("cl100k_base")
-    return len(enc.encode(text))
+def extract_zip_chapters(zip_content):
+    """Extract and numerically sort text files from ZIP"""
+    chapters = []
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        with open(os.path.join(tmp_dir, 'temp.zip'), 'wb') as f:
+            f.write(zip_content)
+        with zipfile.ZipFile(os.path.join(tmp_dir, 'temp.zip')) as zip_ref:
+            zip_ref.extractall(tmp_dir)
+            files = []
+            for root, _, filenames in os.walk(tmp_dir):
+                for filename in filenames:
+                    if filename.endswith('.txt'):
+                        match = re.match(r'^(\d+)', filename)
+                        if match:
+                            num = int(match.group(1))
+                            files.append((num, os.path.join(root, filename)))
+            files.sort(key=lambda x: x[0])
+            for _, file_path in files:
+                with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+                    chapters.append(f.read())
+    return chapters
 
-# File upload and processing
-uploaded_file = st.file_uploader("Upload EPUB", type=["epub"])
+def create_processed_epub(split_chapters):
+    """Generate EPUB with X.Y chapter labeling"""
+    book = epub.EpubBook()
+    book.set_identifier('processed_epub')
+    book.set_title('Processed Book')
+    book.set_language('en')
+
+    for chapter_num, chunks in enumerate(split_chapters, 1):
+        for part_num, chunk in enumerate(chunks, 1):
+            title = f'{chapter_num}.{part_num}'
+            file_name = f'chap_{chapter_num}_{part_num}.xhtml'
+            
+            epub_chapter = epub.EpubHtml(title=title, file_name=file_name)
+            epub_chapter.content = f'<h1>{title}</h1><p>{chunk.replace("\n", "<br/>")}</p>'
+            book.add_item(epub_chapter)
+    
+    book.spine = [item for item in book.get_items() if isinstance(item, epub.EpubHtml)]
+    epub_path = os.path.join(tempfile.gettempdir(), 'processed.epub')
+    epub.write_epub(epub_path, book)
+    return epub_path
+
+# UI Components
+st.title("EPUB/ZIP Translation Processor")
+
+uploaded_file = st.file_uploader("Upload EPUB or ZIP", type=["epub", "zip"])
 
 if uploaded_file:
-    st.session_state.chapters = extract_chapters(uploaded_file.read())
-    st.session_state.chapter_index = 0
+    file_type = uploaded_file.type
+    file_bytes = uploaded_file.read()
+    
+    if file_type == 'application/epub+zip':
+        st.session_state.chapters = extract_epub_chapters(file_bytes)
+    elif file_type == 'application/zip':
+        st.session_state.chapters = extract_zip_chapters(file_bytes)
+    
+    if st.session_state.chapters:
+        st.success(f"Loaded {len(st.session_state.chapters)} chapters")
 
-if st.session_state.chapters:
-    # Chapter navigation
-    chapter_numbers = list(range(1, len(st.session_state.chapters)+1))
-    selected_chapter = st.selectbox("Chapter", chapter_numbers, 
-                                   index=st.session_state.chapter_index)
-    st.session_state.chapter_index = selected_chapter - 1
-
-    # Navigation buttons
-    prev_col, next_col = st.columns(2)
-    with prev_col:
-        if st.button("← Previous", disabled=(st.session_state.chapter_index == 0)):
-            st.session_state.chapter_index -= 1
-            st.rerun()
-    with next_col:
-        if st.button("Next →", disabled=(st.session_state.chapter_index == len(chapter)-1)):
-            st.session_state.chapter_index += 1
-            st.rerun()
-
-    # Chapter display
-    current_chapter = st.session_state.chapters[st.session_state.chapter_index]
-    st.text_area(f"Chapter {selected_chapter}", current_chapter, height=300)
-
-    # Splitting controls
-    if st.button("Process Chapter"):
-        # Determine length function
-        length_function = len if LENGTH_FUNCTION == "Characters" else get_token_length
-
-        # Create splitter
-        if SPLITTER_CHOICE == "Character":
-            splitter = CharacterTextSplitter(
-                separator="\n",
-                chunk_size=CHUNK_SIZE,
-                chunk_overlap=CHUNK_OVERLAP,
-                length_function=length_function
+if st.button("Process and Package"):
+    if not st.session_state.chapters:
+        st.error("No chapters to process!")
+    else:
+        splitter = CharacterTextSplitter(
+            separator="\n",
+            chunk_size=CHUNK_SIZE,
+            chunk_overlap=CHUNK_OVERLAP,
+            length_function=len
+        )
+        
+        processed_chapters = []
+        for chapter in st.session_state.chapters:
+            splits = splitter.split_text(chapter)
+            processed_chapters.append([PREFIX + s for s in splits])
+        
+        epub_path = create_processed_epub(processed_chapters)
+        with open(epub_path, 'rb') as f:
+            st.download_button(
+                label="Download Processed EPUB",
+                data=f,
+                file_name='processed.epub',
+                mime='application/epub+zip'
             )
-        else:
-            splitter = RecursiveCharacterTextSplitter(
-                chunk_size=CHUNK_SIZE,
-                chunk_overlap=CHUNK_OVERLAP,
-                length_function=length_function
-            )
-
-        # Process and display chunks
-        chunks = splitter.split_text(current_chapter)
-        for idx, chunk in enumerate(chunks, 1):
-            prefixed_chunk = f"translate following text from chinese to english\n{chunk}"
-            st.text_area(f"Chunk {idx}", prefixed_chunk, height=150, key=f"chunk_{idx}")
-            st.button(f"Copy Chunk {idx}", key=f"copy_{idx}",
-                      on_click=lambda c=prefixed_chunk: st.session_state.update(copy=c))
-
-        # Clipboard handling
-        if "copy" in st.session_state:
-            st.experimental_set_query_params(text=st.session_state.copy)
-            del st.session_state["copy"]
-
-else:
-    st.info("Upload an EPUB file to begin")
+        os.unlink(epub_path)
