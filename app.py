@@ -71,7 +71,7 @@ if st.session_state.chapters:
             st.session_state.chapter_index -= 1
             st.rerun()
     with next_col:
-        if st.button("Next →", disabled=(st.session_state.chapter_index == len(stapters)-1)):
+        if st.button("Next →", disabled=(st.session_state.chapter_index == len(chapter)-1)):
             st.session_state.chapter_index += 1
             st.rerun()
 
