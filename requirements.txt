@@ -1,0 +1,6 @@
+streamlit>=1.28.0
+langchain>=0.0.330
+tiktoken>=0.5.1
+ebooklib>=0.17.1
+beautifulsoup4>=4.12.2
+chardet>=5.2.0
