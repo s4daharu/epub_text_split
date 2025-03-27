@@ -128,7 +128,7 @@ def build_epub(split_chapters):
 # -------------------------
 # Streamlit Interface
 # -------------------------
-st.title("EPUB/ZIP Chapter Processor")
+st.title("Long Epub Splitter")
 uploaded_file = st.file_uploader("Upload an EPUB or ZIP (of TXT chapters) file", type=["epub", "zip"])
 
 if uploaded_file:
